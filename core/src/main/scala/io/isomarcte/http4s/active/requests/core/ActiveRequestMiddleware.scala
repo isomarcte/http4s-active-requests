@@ -51,7 +51,7 @@ object ActiveRequestMiddleware {
     initial: S,
     onStart: S => S,
     onEnd: S => S,
-    action: (S, Request[F]) => F[Either[Request[F], Response[F]]],
+    action: (S, Request[F]) => F[Either[Request[F], Response[F]]]
   )(
     implicit F: Sync[F]
   ): (F[S], HttpMiddleware[F]) = {
@@ -195,6 +195,11 @@ object ActiveRequestMiddleware {
     *
     * @return the middleware
     */
-  def serviceUnavailableMiddleware[F[_], N](maxConcurrentRequests: N)(implicit F: Sync[F], N: Numeric[N]): HttpMiddleware[F] = this.serviceUnavailableMiddleware_(maxConcurrentRequests)._2
-
+  def serviceUnavailableMiddleware[F[_], N](
+    maxConcurrentRequests: N
+  )(
+    implicit F: Sync[F],
+    N: Numeric[N]
+  ): HttpMiddleware[F] =
+    this.serviceUnavailableMiddleware_(maxConcurrentRequests)._2
 }
