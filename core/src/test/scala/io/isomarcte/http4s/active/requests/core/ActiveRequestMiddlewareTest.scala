@@ -12,17 +12,18 @@ import scala.concurrent._
 final class ActiveRequestMiddlewareTest extends BaseTest {
 
   "serviceUnavailableMiddleware" should "reject requests if there are too many concurrently running" in io {
-    val ec: ExecutionContext = BaseTest.cachedEC
-    val limit: Int = 1
+    val ec: ExecutionContext  = BaseTest.cachedEC
+    val limit: Int            = 1
     val latch: CountDownLatch = new CountDownLatch(2)
-    val semaphore: Semaphore = new Semaphore(limit)
-    val request: Request[IO] = Request[IO]()
-    val f: IO[Unit] = IO(latch.countDown()) *> IO(semaphore.acquire())
+    val semaphore: Semaphore  = new Semaphore(limit)
+    val request: Request[IO]  = Request[IO]()
+    val f: IO[Unit]           = IO(latch.countDown()) *> IO(semaphore.acquire())
     val (activeRequests, middleware): (IO[Long], HttpMiddleware[IO]) =
       ActiveRequestMiddleware.serviceUnavailableMiddleware_[IO, Long](
         limit.toLong
       )
-    val service: HttpService[IO] = middleware(ActiveRequestMiddlewareTest.effectService[IO](f))
+    val service: HttpService[IO] =
+      middleware(ActiveRequestMiddlewareTest.effectService[IO](f))
 
     for {
       // T0
@@ -67,11 +68,8 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
 }
 
 object ActiveRequestMiddlewareTest {
-  def effectService[F[_]](
-    f: F[Unit]
-  )(
-    implicit F: Sync[F]
-  ): HttpService[F] = {
+
+  def effectService[F[_]](f: F[Unit])(implicit F: Sync[F]): HttpService[F] = {
     val resp: Option[Response[F]] = Some(Response(status = Status.Ok))
     Kleisli(
       Function.const(

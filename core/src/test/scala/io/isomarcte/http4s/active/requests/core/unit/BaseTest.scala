@@ -10,6 +10,7 @@ abstract class BaseTest extends FlatSpec with Matchers {
 }
 
 object BaseTest {
+
   val cachedEC: ExecutionContext = ExecutionContext.fromExecutorService(
     Executors.newCachedThreadPool()
   )

@@ -5,4 +5,4 @@ jdk:
   - openjdk8
   - openjdk11
 script:
-  - sbt +clean +test +doc +test:doc
+  - sbt scalafmtCheckAll scalafmtSbtCheck +clean +test +doc +test:doc
