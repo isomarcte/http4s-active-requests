@@ -82,6 +82,9 @@ object ActiveRequestMiddleware {
     * taken based off the current number of active requests and the current
     * request.
     *
+    * @param startReport report the request count every time it is
+    *                    incremented.
+    * @param endReport report the request count every time it is decremented.
     * @param action a function of the number of active requests and the
     *                current `Request` which yields either a `Request` or a
     *                `Response`. If a `Response` is yielded this has the
@@ -90,25 +93,31 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return a pair of a `F[N]` which can be used to inspect the current
-    *         state externally and the middleware.
+    * @return the middleware.
     */
   def activeRequestCountMiddleware[F[_], N](
+    startReport: N => F[Unit],
+    endReport: N => F[Unit],
     action: (N, Request[F]) => F[Either[Request[F], Response[F]]]
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): (F[N], HttpMiddleware[F]) = {
+  ): HttpMiddleware[F] = {
     val state: AtomicReference[N] = new AtomicReference(N.zero)
     val inspect: F[N]             = F.delay(state.get)
-    val succ: F[Unit] =
-      F.delay(state.updateAndGet(unaryOp((n: N) => N.plus(n, N.one)))).void
-    val pred: F[Unit] =
-      F.delay(state.updateAndGet(unaryOp((n: N) => N.minus(n, N.one)))).void
+    val succ: F[Unit] = for {
+      n <- F.delay(state.updateAndGet(unaryOp((n: N) => N.plus(n, N.one))))
+      unit <- startReport(n)
+    } yield unit
+
+    val pred: F[Unit] = for {
+      n <- F.delay(state.updateAndGet(unaryOp((n: N) => N.minus(n, N.one))))
+      unit <- endReport(n)
+    } yield unit
 
     val primitiveAction: Request[F] => F[Either[Request[F], Response[F]]] =
       ((r: Request[F]) => inspect.flatMap((n: N) => action(n, r)))
 
-    (inspect, this.primitive(succ, pred, primitiveAction))
+    this.primitive(succ, pred, primitiveAction)
   }
 
   /** Middleware which bypasses the service if there are more than a certain
@@ -116,43 +125,9 @@ object ActiveRequestMiddleware {
     * ''always'' indicates that the given `Response[F]` value is yielded,
     * bypassing the underlying service.
     *
-    * @param onMax an effect to invoke if the permitted maximum number of
-    *              concurrent requests is exceeded. One might use this for to
-    *              log the event for example.
-    * @param response the `Response` to yield when there are too many active
-    *        requests.
-    *
-    * @param maxConcurrentRequests the maximum number of concurrent requests
-    *        to allow.
-    *
-    * @tparam F a `Sync` type.
-    * @tparam N a `Numeric` state type, e.g. `Long`.
-    *
-    * @return a pair of a `F[N]` which can be used to inspect the current
-    *         state externally and the middleware.
-    */
-  def rejectWithResponseOverMaxMiddleware_[F[_], N](
-    onMax: F[Unit],
-    response: Response[F]
-  )(
-    maxConcurrentRequests: N
-  )(implicit F: Sync[F],
-    N: Numeric[N]
-  ): (F[N], HttpMiddleware[F]) = {
-    val resp: Either[Request[F], Response[F]] = Right(response)
-    this.activeRequestCountMiddleware(
-      (currentActiveRequests: N, req: Request[F]) =>
-        if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
-          onMax.map(Function.const(resp))
-        } else {
-          F.pure(Left(req))
-        }
-    )
-  }
-
-  /** Middleware which bypasses the service if there are more than a certain
-    * number of active requests.
-    *
+    * @param startReport report the request count every time it is
+    *                    incremented.
+    * @param endReport report the request count every time it is decremented.
     * @param onMax an effect to invoke if the permitted maximum number of
     *              concurrent requests is exceeded. One might use this for to
     *              log the event for example.
@@ -168,22 +143,34 @@ object ActiveRequestMiddleware {
     * @return the middleware.
     */
   def rejectWithResponseOverMaxMiddleware[F[_], N](
+    startReport: N => F[Unit],
+    endReport: N => F[Unit],
     onMax: F[Unit],
     response: Response[F]
   )(
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): HttpMiddleware[F] =
-    this
-      .rejectWithResponseOverMaxMiddleware_(onMax, response)(
-        maxConcurrentRequests
-      )
-      ._2
+  ): HttpMiddleware[F] = {
+    val resp: Either[Request[F], Response[F]] = Right(response)
+    this.activeRequestCountMiddleware(
+      startReport,
+      endReport,
+      (currentActiveRequests: N, req: Request[F]) =>
+        if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
+          onMax.map(Function.const(resp))
+        } else {
+          F.pure(Left(req))
+        }
+    )
+  }
 
   /** Middleware which returns a 503 (ServiceUnavailable) response after it is
     * processing more than a given number of requests.
     *
+    * @param startReport report the request count every time it is
+    *                    incremented.
+    * @param endReport report the request count every time it is decremented.
     * @param onMax an effect to invoke if the permitted maximum number of
     *              concurrent requests is exceeded. One might use this for to
     *              log the event for example.
@@ -193,16 +180,19 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return a pair of a `F[N]` which can be used to inspect the current
-    *         state externally and the middleware.
+    * @return the middleware.
     */
   def serviceUnavailableMiddleware_[F[_], N](
+    startReport: N => F[Unit],
+    endReport: N => F[Unit],
     onMax: F[Unit],
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): (F[N], HttpMiddleware[F]) =
-    this.rejectWithResponseOverMaxMiddleware_[F, N](
+  ): HttpMiddleware[F] =
+    this.rejectWithResponseOverMaxMiddleware[F, N](
+      startReport,
+      endReport,
       onMax,
       Response(status = Status.ServiceUnavailable)
     )(
@@ -224,6 +214,13 @@ object ActiveRequestMiddleware {
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): HttpMiddleware[F] =
-    this.serviceUnavailableMiddleware_(F.pure(()), maxConcurrentRequests)._2
+  ): HttpMiddleware[F] = {
+    val const: N => F[Unit] = Function.const(F.pure(()))
+    this.serviceUnavailableMiddleware_(
+      const,
+      const,
+      F.pure(()),
+      maxConcurrentRequests
+    )
+  }
 }
