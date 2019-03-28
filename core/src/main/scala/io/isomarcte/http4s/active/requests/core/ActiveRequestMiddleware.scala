@@ -13,11 +13,9 @@ import org.http4s.server._
 object ActiveRequestMiddleware {
 
   /** A `UnaryOperator` for updating the `AtomicReference` state. */
-  private[this] def unaryOp[S](
-    f: S => S
-  ): UnaryOperator[S] =
+  private[this] def unaryOp[S](f: S => S): UnaryOperator[S] =
     new UnaryOperator[S] {
-      override final def apply(s: S): S = f(s)
+      final override def apply(s: S): S = f(s)
     }
 
   /** This function provides the fundamental primitive operations on which the
@@ -52,19 +50,20 @@ object ActiveRequestMiddleware {
     onStart: S => S,
     onEnd: S => S,
     action: (S, Request[F]) => F[Either[Request[F], Response[F]]]
-  )(
-    implicit F: Sync[F]
+  )(implicit F: Sync[F]
   ): (F[S], HttpMiddleware[F]) = {
     val state: AtomicReference[S] = new AtomicReference(initial)
-    val onStartOp: F[S] = F.delay(state.updateAndGet(unaryOp(onStart)))
-    val onEndOp: F[Unit] = F.delay(state.updateAndGet(unaryOp(onEnd))).void
+    val onStartOp: F[S]           = F.delay(state.updateAndGet(unaryOp(onStart)))
+    val onEndOp: F[Unit]          = F.delay(state.updateAndGet(unaryOp(onEnd))).void
 
     def use(
       service: Kleisli[OptionT[F, ?], Request[F], Response[F]],
       req: Request[F]
-    )(s: S): Stream[F, Option[Response[F]]] =
+    )(
+      s: S
+    ): Stream[F, Option[Response[F]]] =
       Stream.eval(
-        action(s, req).flatMap{
+        action(s, req).flatMap {
           case Left(req) =>
             service.run(req).value
           case Right(resp) =>
@@ -72,15 +71,22 @@ object ActiveRequestMiddleware {
         }
       )
 
-    (F.delay(state.get),
+    (
+      F.delay(state.get),
       (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
-      Kleisli[OptionT[F, ?], Request[F], Response[F]]((req: Request[F]) =>
-        OptionT(
-          Stream.bracket(onStartOp)(
-            use = use(service, req),
-            release = Function.const(onEndOp)
-          ).compile.toList.map((l: List[Option[Response[F]]]) => l.headOption.flatten))
-      )
+        Kleisli[OptionT[F, ?], Request[F], Response[F]](
+          (req: Request[F]) =>
+            OptionT(
+              Stream
+                .bracket(onStartOp)(
+                  use = use(service, req),
+                  release = Function.const(onEndOp)
+                )
+                .compile
+                .toList
+                .map((l: List[Option[Response[F]]]) => l.headOption.flatten)
+            )
+        )
     )
   }
 
@@ -101,11 +107,15 @@ object ActiveRequestMiddleware {
     */
   def activeRequestCountMiddleware[F[_], N](
     action: (N, Request[F]) => F[Either[Request[F], Response[F]]]
-  )(
-    implicit F: Sync[F],
-             N: Numeric[N]
+  )(implicit F: Sync[F],
+    N: Numeric[N]
   ): (F[N], HttpMiddleware[F]) =
-    this.primitive(N.zero, (n: N) => N.plus(n, N.one), (n: N) => N.minus(n, N.one), action)
+    this.primitive(
+      N.zero,
+      (n: N) => N.plus(n, N.one),
+      (n: N) => N.minus(n, N.one),
+      action
+    )
 
   /** Middleware which bypasses the service if there are more than a certain
     * number of active requests.
@@ -126,18 +136,17 @@ object ActiveRequestMiddleware {
     response: Response[F]
   )(
     maxConcurrentRequests: N
-  )(
-    implicit F: Sync[F],
-             N: Numeric[N]
+  )(implicit F: Sync[F],
+    N: Numeric[N]
   ): (F[N], HttpMiddleware[F]) = {
     val resp: Either[Request[F], Response[F]] = Right(response)
     this.activeRequestCountMiddleware(
       (currentActiveRequests: N, req: Request[F]) =>
-      if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
-        F.pure(resp)
-      } else {
-        F.pure(Left(req))
-      }
+        if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
+          F.pure(resp)
+        } else {
+          F.pure(Left(req))
+        }
     )
   }
 
@@ -159,11 +168,12 @@ object ActiveRequestMiddleware {
     response: Response[F]
   )(
     maxConcurrentRequests: N
-  )(
-    implicit F: Sync[F],
-             N: Numeric[N]
-  ): HttpMiddleware[F] = this.rejectWithResponseOverMaxMiddleware_(response)(maxConcurrentRequests)._2
-
+  )(implicit F: Sync[F],
+    N: Numeric[N]
+  ): HttpMiddleware[F] =
+    this
+      .rejectWithResponseOverMaxMiddleware_(response)(maxConcurrentRequests)
+      ._2
 
   /** Middleware which returns a 503 (ServiceUnavailable) response after it is
     * processing more than a given number of requests.
@@ -174,10 +184,14 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return a pair of a `F[S]` which can be used to inspect the current
+    * @return a pair of a `F[N]` which can be used to inspect the current
     *         state externally and the middleware.
     */
-  def serviceUnavailableMiddleware_[F[_], N](maxConcurrentRequests: N)(implicit F: Sync[F], N: Numeric[N]): (F[N], HttpMiddleware[F]) =
+  def serviceUnavailableMiddleware_[F[_], N](
+    maxConcurrentRequests: N
+  )(implicit F: Sync[F],
+    N: Numeric[N]
+  ): (F[N], HttpMiddleware[F]) =
     this.rejectWithResponseOverMaxMiddleware_[F, N](
       Response(status = Status.ServiceUnavailable)
     )(
@@ -197,8 +211,7 @@ object ActiveRequestMiddleware {
     */
   def serviceUnavailableMiddleware[F[_], N](
     maxConcurrentRequests: N
-  )(
-    implicit F: Sync[F],
+  )(implicit F: Sync[F],
     N: Numeric[N]
   ): HttpMiddleware[F] =
     this.serviceUnavailableMiddleware_(maxConcurrentRequests)._2
