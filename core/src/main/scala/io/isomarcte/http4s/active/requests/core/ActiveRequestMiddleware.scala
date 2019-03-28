@@ -23,47 +23,38 @@ object ActiveRequestMiddleware {
     * level middlewares. Unless you have very specific needs, you should avoid
     * using it directly.
     *
-    * Fundamentally it takes an initial state, and two unary functions to
-    * apply to that state at the start and end of a request. For example, if
-    * you are merely interested in counting the number of active requests, you
-    * might choose `Long` as your state and `+1` and `-1` as your unary
-    * functions.
+    * Fundamentally takes two effects, one to run when a request is received,
+    * and one to run when a response is emitted. It also takes an action,
+    * which is a function of the current request, which emits an effect of an
+    * `Either[Request[F], Response[F]]`. If a `Right[Response[F]]` is emitted,
+    * this will bypass calling the underlying service and immediately return
+    * the generated `Response[F]` value.
     *
-    * @param  initial the initial state value.
-    * @param  onStart a function to apply to the current state each time a new
-    *                 `Request` is received.
-    * @param  onEnd   a function to apply to the current state each time a
-    *                 `Response` is returned.
-    * @param action a function of the current state and the `Request` which
-    *                yields either a `Request` or a `Response`. If a
-    *                `Response` is yielded this has the effect of bypassing
-    *                the underlying service.
+    * @param initial the initial state value.
+    * @param onStart an effect to run after a request is received.
+    * @param onEnd an effect to run after a response is emitted.
+    * @param action a function of the current `Request` which yields either a
+    *                `Request` or a `Response`. If a `Response` is yielded
+    *                this has the effect of bypassing the underlying service.
     *
     * @tparam F a `Sync` type.
-    * @tparam S the state.
     *
     * @return a pair of a `F[S]` which can be used to inspect the current
     *         state externally and the middleware.
     */
-  def primitive[F[_], S](
-    initial: S,
-    onStart: S => S,
-    onEnd: S => S,
-    action: (S, Request[F]) => F[Either[Request[F], Response[F]]]
+  def primitive[F[_]](
+    onStart: F[Unit],
+    onEnd: F[Unit],
+    action: Request[F] => F[Either[Request[F], Response[F]]]
   )(implicit F: Sync[F]
-  ): (F[S], HttpMiddleware[F]) = {
-    val state: AtomicReference[S] = new AtomicReference(initial)
-    val onStartOp: F[S]           = F.delay(state.updateAndGet(unaryOp(onStart)))
-    val onEndOp: F[Unit]          = F.delay(state.updateAndGet(unaryOp(onEnd))).void
+  ): HttpMiddleware[F] = {
 
     def use(
       service: Kleisli[OptionT[F, ?], Request[F], Response[F]],
       req: Request[F]
-    )(
-      s: S
     ): Stream[F, Option[Response[F]]] =
       Stream.eval(
-        action(s, req).flatMap {
+        action(req).flatMap {
           case Left(req) =>
             service.run(req).value
           case Right(resp) =>
@@ -71,23 +62,20 @@ object ActiveRequestMiddleware {
         }
       )
 
-    (
-      F.delay(state.get),
-      (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
-        Kleisli[OptionT[F, ?], Request[F], Response[F]](
-          (req: Request[F]) =>
-            OptionT(
-              Stream
-                .bracket(onStartOp)(
-                  use = use(service, req),
-                  release = Function.const(onEndOp)
-                )
-                .compile
-                .toList
-                .map((l: List[Option[Response[F]]]) => l.headOption.flatten)
-            )
-        )
-    )
+    (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
+      Kleisli[OptionT[F, ?], Request[F], Response[F]](
+        (req: Request[F]) =>
+          OptionT(
+            Stream
+              .bracket(onStart)(
+                use = Function.const(use(service, req)),
+                release = Function.const(onEnd)
+              )
+              .compile
+              .toList
+              .map((l: List[Option[Response[F]]]) => l.headOption.flatten)
+          )
+      )
   }
 
   /** Middleware which counts the active requests and allows for an action to be
@@ -102,24 +90,35 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return a pair of a `F[S]` which can be used to inspect the current
+    * @return a pair of a `F[N]` which can be used to inspect the current
     *         state externally and the middleware.
     */
   def activeRequestCountMiddleware[F[_], N](
     action: (N, Request[F]) => F[Either[Request[F], Response[F]]]
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): (F[N], HttpMiddleware[F]) =
-    this.primitive(
-      N.zero,
-      (n: N) => N.plus(n, N.one),
-      (n: N) => N.minus(n, N.one),
-      action
-    )
+  ): (F[N], HttpMiddleware[F]) = {
+    val state: AtomicReference[N] = new AtomicReference(N.zero)
+    val inspect: F[N]             = F.delay(state.get)
+    val succ: F[Unit] =
+      F.delay(state.updateAndGet(unaryOp((n: N) => N.plus(n, N.one)))).void
+    val pred: F[Unit] =
+      F.delay(state.updateAndGet(unaryOp((n: N) => N.minus(n, N.one)))).void
+
+    val primitiveAction: Request[F] => F[Either[Request[F], Response[F]]] =
+      ((r: Request[F]) => inspect.flatMap((n: N) => action(n, r)))
+
+    (inspect, this.primitive(succ, pred, primitiveAction))
+  }
 
   /** Middleware which bypasses the service if there are more than a certain
-    * number of active requests.
+    * number of active requests. When the `onMax` effect is invoked, this
+    * ''always'' indicates that the given `Response[F]` value is yielded,
+    * bypassing the underlying service.
     *
+    * @param onMax an effect to invoke if the permitted maximum number of
+    *              concurrent requests is exceeded. One might use this for to
+    *              log the event for example.
     * @param response the `Response` to yield when there are too many active
     *        requests.
     *
@@ -129,10 +128,11 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return a pair of a `F[S]` which can be used to inspect the current
+    * @return a pair of a `F[N]` which can be used to inspect the current
     *         state externally and the middleware.
     */
   def rejectWithResponseOverMaxMiddleware_[F[_], N](
+    onMax: F[Unit],
     response: Response[F]
   )(
     maxConcurrentRequests: N
@@ -143,7 +143,7 @@ object ActiveRequestMiddleware {
     this.activeRequestCountMiddleware(
       (currentActiveRequests: N, req: Request[F]) =>
         if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
-          F.pure(resp)
+          onMax.map(Function.const(resp))
         } else {
           F.pure(Left(req))
         }
@@ -153,6 +153,9 @@ object ActiveRequestMiddleware {
   /** Middleware which bypasses the service if there are more than a certain
     * number of active requests.
     *
+    * @param onMax an effect to invoke if the permitted maximum number of
+    *              concurrent requests is exceeded. One might use this for to
+    *              log the event for example.
     * @param response the `Response` to yield when there are too many active
     *        requests.
     *
@@ -165,6 +168,7 @@ object ActiveRequestMiddleware {
     * @return the middleware.
     */
   def rejectWithResponseOverMaxMiddleware[F[_], N](
+    onMax: F[Unit],
     response: Response[F]
   )(
     maxConcurrentRequests: N
@@ -172,12 +176,17 @@ object ActiveRequestMiddleware {
     N: Numeric[N]
   ): HttpMiddleware[F] =
     this
-      .rejectWithResponseOverMaxMiddleware_(response)(maxConcurrentRequests)
+      .rejectWithResponseOverMaxMiddleware_(onMax, response)(
+        maxConcurrentRequests
+      )
       ._2
 
   /** Middleware which returns a 503 (ServiceUnavailable) response after it is
     * processing more than a given number of requests.
     *
+    * @param onMax an effect to invoke if the permitted maximum number of
+    *              concurrent requests is exceeded. One might use this for to
+    *              log the event for example.
     * @param maxConcurrentRequests the maximum number of concurrent requests
     *        to allow.
     *
@@ -188,11 +197,13 @@ object ActiveRequestMiddleware {
     *         state externally and the middleware.
     */
   def serviceUnavailableMiddleware_[F[_], N](
+    onMax: F[Unit],
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
   ): (F[N], HttpMiddleware[F]) =
     this.rejectWithResponseOverMaxMiddleware_[F, N](
+      onMax,
       Response(status = Status.ServiceUnavailable)
     )(
       maxConcurrentRequests
@@ -207,12 +218,12 @@ object ActiveRequestMiddleware {
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
     *
-    * @return the middleware
+    * @return the middleware.
     */
   def serviceUnavailableMiddleware[F[_], N](
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
   ): HttpMiddleware[F] =
-    this.serviceUnavailableMiddleware_(maxConcurrentRequests)._2
+    this.serviceUnavailableMiddleware_(F.pure(()), maxConcurrentRequests)._2
 }
