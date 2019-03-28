@@ -13,16 +13,22 @@ import scala.concurrent._
 final class ActiveRequestMiddlewareTest extends BaseTest {
 
   "serviceUnavailableMiddleware" should "reject requests if there are too many concurrently running" in io {
-    val ec: ExecutionContext      = BaseTest.cachedEC
-    val limit: Int                = 1
-    val latch: CountDownLatch     = new CountDownLatch(2)
-    val semaphore: Semaphore      = new Semaphore(limit)
-    val onMaxCount: AtomicInteger = new AtomicInteger(0)
-    val request: Request[IO]      = Request[IO]()
-    val f: IO[Unit]               = IO(latch.countDown()) *> IO(semaphore.acquire())
-    val onMax: IO[Unit]           = IO(onMaxCount.incrementAndGet()).void
-    val (activeRequests, middleware): (IO[Long], HttpMiddleware[IO]) =
+    val ec: ExecutionContext           = BaseTest.cachedEC
+    val limit: Int                     = 1
+    val latch: CountDownLatch          = new CountDownLatch(2)
+    val semaphore: Semaphore           = new Semaphore(limit)
+    val onMaxCount: AtomicInteger      = new AtomicInteger(0)
+    val onStartReportValue: AtomicLong = new AtomicLong(0L)
+    val onEndReportValue: AtomicLong   = new AtomicLong(0L)
+    val startPoll: IO[Long]            = IO(onStartReportValue.get)
+    val endPoll: IO[Long]              = IO(onEndReportValue.get)
+    val request: Request[IO]           = Request[IO]()
+    val f: IO[Unit]                    = IO(latch.countDown()) *> IO(semaphore.acquire())
+    val onMax: IO[Unit]                = IO(onMaxCount.incrementAndGet()).void
+    val middleware: HttpMiddleware[IO] =
       ActiveRequestMiddleware.serviceUnavailableMiddleware_[IO, Long](
+        (l: Long) => IO(onStartReportValue.set(l)),
+        (l: Long) => IO(onEndReportValue.set(l)),
         onMax,
         limit.toLong
       )
@@ -32,7 +38,8 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
     for {
       // T0
       resp0 <- service.run(request).value // Should be Ok
-      count0 <- activeRequests // Should be 0
+      start0 <- startPoll
+      end0 <- endPoll
 
       // T1
       // Out of permits so this will block. We will join the Fiber later
@@ -41,34 +48,41 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
       // Wait for the latch to reach zero before we poll. This should indicate
       // that we have already incremented the counter.
       _ <- IO(latch.await())
-      count1 <- activeRequests // Should be 1
+      start1 <- startPoll
+      end1 <- endPoll
 
       // T2
       // This should _not_ block, because there are too many active request. It should return a 503 immediately.
       resp2 <- service.run(request).value // Should be ServiceUnavailable
-      count2 <- activeRequests // Should be 1
+      start2 <- startPoll
+      end2 <- endPoll
 
       // T3
       // Release a permit to allow `fiber1` to complete.
       _ <- IO(semaphore.release())
       resp1 <- fiber1.join // Should be Ok
-      count3 <- activeRequests // Should be 0
+      start3 <- startPoll
+      end3 <- endPoll
       onMaxValue <- IO(onMaxCount.get)
     } yield {
       // T0
       resp0.get.status shouldBe Status.Ok
-      count0 shouldBe 0L
+      start0 shouldBe 1L
+      end0 shouldBe 0L
 
       // T1
-      count1 shouldBe 1L
+      start1 shouldBe 1L
+      end1 shouldBe 0L
       resp1.get.status shouldBe Status.Ok
 
       // T2
       resp2.get.status shouldBe Status.ServiceUnavailable
-      count2 shouldBe 1L
+      start2 shouldBe 2L
+      end2 shouldBe 1L
 
       // T3
-      count3 shouldBe 0L
+      start3 shouldBe 2L
+      end3 shouldBe 0L
 
       // Check number of times the onMax event fired
       onMaxValue shouldBe 1
