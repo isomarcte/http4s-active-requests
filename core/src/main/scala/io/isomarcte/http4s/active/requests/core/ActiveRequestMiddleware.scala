@@ -12,6 +12,16 @@ import org.http4s.server._
 /** Http4s middleware which allows for introspection based on the number of active requests. */
 object ActiveRequestMiddleware {
 
+  /** Whether or not to perform the active request action. */
+  sealed trait RequestFilterAction extends Product with Serializable
+
+  object RequestFilterAction {
+    /** Perform the active request action. */
+    case object PerformAction extends RequestFilterAction
+    /** Bypass the active request action. */
+    case object ByPassAction extends RequestFilterAction
+  }
+
   /** A `UnaryOperator` for updating the `AtomicReference` state. */
   private[this] def unaryOp[S](f: S => S): UnaryOperator[S] =
     new UnaryOperator[S] {
@@ -133,6 +143,57 @@ object ActiveRequestMiddleware {
     *              log the event for example.
     * @param response the `Response` to yield when there are too many active
     *        requests.
+    * @param requestAction a function yielding a [[RequestFilterAction]] which
+    *                      determines if the given request should be processed
+    *                      even if we are at the max concurrent request value.
+    *
+    * @param maxConcurrentRequests the maximum number of concurrent requests
+    *        to allow.
+    *
+    * @tparam F a `Sync` type.
+    * @tparam N a `Numeric` state type, e.g. `Long`.
+    *
+    * @return the middleware.
+    */
+  def rejectWithResponseOverMaxMiddleware_[F[_], N](
+    startReport: N => F[Unit],
+    endReport: N => F[Unit],
+    onMax: F[Unit],
+    response: Response[F],
+    requestAction: Request[F] => RequestFilterAction
+  )(
+    maxConcurrentRequests: N
+  )(implicit F: Sync[F],
+    N: Numeric[N]
+  ): HttpMiddleware[F] = {
+    val resp: Either[Request[F], Response[F]] = Right(response)
+    this.activeRequestCountMiddleware(
+      startReport,
+      endReport,
+      (currentActiveRequests: N, req: Request[F]) =>
+        if (requestAction(req) == RequestFilterAction.ByPassAction) {
+          F.pure(Left(req))
+        } else if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
+          onMax.map(Function.const(resp))
+        } else {
+          F.pure(Left(req))
+        }
+    )
+  }
+
+  /** Middleware which bypasses the service if there are more than a certain
+    * number of active requests. When the `onMax` effect is invoked, this
+    * ''always'' indicates that the given `Response[F]` value is yielded,
+    * bypassing the underlying service.
+    *
+    * @param startReport report the request count every time it is
+    *                    incremented.
+    * @param endReport report the request count every time it is decremented.
+    * @param onMax an effect to invoke if the permitted maximum number of
+    *              concurrent requests is exceeded. One might use this for to
+    *              log the event for example.
+    * @param response the `Response` to yield when there are too many active
+    *        requests.
     *
     * @param maxConcurrentRequests the maximum number of concurrent requests
     *        to allow.
@@ -151,19 +212,14 @@ object ActiveRequestMiddleware {
     maxConcurrentRequests: N
   )(implicit F: Sync[F],
     N: Numeric[N]
-  ): HttpMiddleware[F] = {
-    val resp: Either[Request[F], Response[F]] = Right(response)
-    this.activeRequestCountMiddleware(
+  ): HttpMiddleware[F] =
+    this.rejectWithResponseOverMaxMiddleware_[F, N](
       startReport,
       endReport,
-      (currentActiveRequests: N, req: Request[F]) =>
-        if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
-          onMax.map(Function.const(resp))
-        } else {
-          F.pure(Left(req))
-        }
-    )
-  }
+      onMax,
+      response,
+      Function.const(RequestFilterAction.PerformAction)
+    )(maxConcurrentRequests)
 
   /** Middleware which returns a 503 (ServiceUnavailable) response after it is
     * processing more than a given number of requests.
@@ -176,6 +232,9 @@ object ActiveRequestMiddleware {
     *              log the event for example.
     * @param maxConcurrentRequests the maximum number of concurrent requests
     *        to allow.
+    * @param requestAction a function yielding a [[RequestFilterAction]] which
+    *                      determines if the given request should be processed
+    *                      even if we are at the max concurrent request value.
     *
     * @tparam F a `Sync` type.
     * @tparam N a `Numeric` state type, e.g. `Long`.
@@ -186,15 +245,17 @@ object ActiveRequestMiddleware {
     startReport: N => F[Unit],
     endReport: N => F[Unit],
     onMax: F[Unit],
-    maxConcurrentRequests: N
+    maxConcurrentRequests: N,
+    requestActionFilter: Request[F] => RequestFilterAction
   )(implicit F: Sync[F],
     N: Numeric[N]
   ): HttpMiddleware[F] =
-    this.rejectWithResponseOverMaxMiddleware[F, N](
+    this.rejectWithResponseOverMaxMiddleware_[F, N](
       startReport,
       endReport,
       onMax,
-      Response(status = Status.ServiceUnavailable)
+      Response(status = Status.ServiceUnavailable),
+      requestActionFilter
     )(
       maxConcurrentRequests
     )
@@ -220,7 +281,8 @@ object ActiveRequestMiddleware {
       const,
       const,
       F.pure(()),
-      maxConcurrentRequests
+      maxConcurrentRequests,
+      Function.const(RequestFilterAction.PerformAction)
     )
   }
 }

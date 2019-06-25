@@ -3,6 +3,7 @@ package io.isomarcte.http4s.active.requests.core.unit
 import cats.data._
 import cats.effect._
 import cats.implicits._
+import io.isomarcte.http4s.active.requests.core.ActiveRequestMiddleware._
 import io.isomarcte.http4s.active.requests.core._
 import java.util.concurrent._
 import java.util.concurrent.atomic._
@@ -30,7 +31,8 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
         (l: Long) => IO(onStartReportValue.set(l)),
         (l: Long) => IO(onEndReportValue.set(l)),
         onMax,
-        limit.toLong
+        limit.toLong,
+        Function.const(RequestFilterAction.PerformAction)
       )
     val service: HttpService[IO] =
       middleware(ActiveRequestMiddlewareTest.effectService[IO](f))
