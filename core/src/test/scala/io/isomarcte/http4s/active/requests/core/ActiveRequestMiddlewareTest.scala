@@ -14,6 +14,7 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
 
   "serviceUnavailableMiddleware" should "reject requests if there are too many concurrently running" in io {
     val ec: ExecutionContext           = BaseTest.cachedEC
+    implicit val cs: ContextShift[IO] = IO.contextShift(ec)
     val limit: Int                     = 1
     val latch: CountDownLatch          = new CountDownLatch(2)
     val semaphore: Semaphore           = new Semaphore(limit)
@@ -32,7 +33,7 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
         onMax,
         limit.toLong
       )
-    val service: HttpService[IO] =
+    val service: HttpRoutes[IO] =
       middleware(ActiveRequestMiddlewareTest.effectService[IO](f))
 
     for {
@@ -92,7 +93,7 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
 
 object ActiveRequestMiddlewareTest {
 
-  def effectService[F[_]](f: F[Unit])(implicit F: Sync[F]): HttpService[F] = {
+  def effectService[F[_]](f: F[Unit])(implicit F: Sync[F]): HttpRoutes[F] = {
     val resp: Option[Response[F]] = Some(Response(status = Status.Ok))
     Kleisli(
       Function.const(
