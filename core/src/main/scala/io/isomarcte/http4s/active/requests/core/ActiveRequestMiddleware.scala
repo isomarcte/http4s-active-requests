@@ -68,9 +68,8 @@ object ActiveRequestMiddleware {
           OptionT(
             Stream
               .bracket(onStart)(
-                use = Function.const(use(service, req)),
-                release = Function.const(onEnd)
-              )
+                Function.const(onEnd)
+              ).flatMap(Function.const(use(service, req)))
               .compile
               .toList
               .map((l: List[Option[Response[F]]]) => l.headOption.flatten)

@@ -24,8 +24,8 @@ val scalatestA    = "scalatest"
 
 // Versions //
 
-val fs2V       = "0.10.6"
-val http4sV    = "0.18.23"
+val fs2V       = "1.0.5"
+val http4sV    = "0.20.7"
 val scalatestV = "3.0.7"
 
 // GAVs //
