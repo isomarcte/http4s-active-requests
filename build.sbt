@@ -87,9 +87,9 @@ releaseProcess := Seq[ReleaseStep](
   runClean,
   runTest,
   setReleaseVersion,
+  releaseStepCommandAndRemaining("+publishSigned"),
   commitReleaseVersion,
   tagRelease,
-  releaseStepCommandAndRemaining("+publishSigned"),
   setNextVersion,
   commitNextVersion,
   pushChanges
