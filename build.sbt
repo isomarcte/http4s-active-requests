@@ -4,7 +4,7 @@ import ReleaseTransformations._
 
 val projectName = "http4s-active-requests"
 val scala211    = "2.11.12"
-val scala212    = "2.12.8"
+val scala212    = "2.12.10"
 
 // Lazy
 
@@ -15,31 +15,40 @@ lazy val scalaVersions = List(scala211, scala212)
 val fs2G       = "co.fs2"
 val http4sG    = "org.http4s"
 val scalatestG = "org.scalatest"
+val typelevelG = "org.typelevel"
 
 // Artifacts //
 
+val catsCoreA     = "cats-core"
+val catsEffectA   = "cats-effect"
 val fs2CoreA      = "fs2-core"
 val http4sServerA = "http4s-server"
 val scalatestA    = "scalatest"
 
 // Versions //
 
-val fs2V       = "1.0.5"
-val http4sV    = "0.20.7"
-val scalatestV = "3.0.7"
+val catsCoreV   = "1.6.1"
+val catsEffectV = "1.4.0"
+val fs2V        = "1.0.5"
+val http4sV     = "0.20.11"
+val scalatestV  = "3.0.8"
 
 // GAVs //
 
+lazy val catsCore     = typelevelG %% catsCoreA     % catsCoreV
+lazy val catsEffect   = typelevelG %% catsEffectA   % catsEffectV
 lazy val fs2Core      = fs2G       %% fs2CoreA      % fs2V
 lazy val http4sServer = http4sG    %% http4sServerA % http4sV
 lazy val scalatest    = scalatestG %% scalatestA    % scalatestV
 
 // ThisBuild Scoped Settings //
 
-ThisBuild / organization := "io.isomarcte"
-ThisBuild / scalaVersion := scala212
-ThisBuild / scalacOptions += "-target:jvm-1.8"
-ThisBuild / javacOptions ++= Seq("-source", "1.8", "-target", "1.8")
+ThisBuild / organization        := "io.isomarcte"
+ThisBuild / scalaVersion        := scala212
+ThisBuild / scalacOptions       += "-target:jvm-1.8"
+ThisBuild / javacOptions        ++= Seq("-source", "1.8", "-target", "1.8")
+ThisBuild / dependencyOverrides ++= Seq(
+  catsEffect, catsCore)
 
 // General Configuration //
 lazy val publishSettings = Seq(

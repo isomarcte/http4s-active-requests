@@ -3,7 +3,6 @@ package io.isomarcte.http4s.active.requests.core
 import cats.data._
 import cats.effect._
 import cats.implicits._
-import fs2.Stream
 import java.util.concurrent.atomic._
 import java.util.function.UnaryOperator
 import org.http4s._
@@ -46,35 +45,17 @@ object ActiveRequestMiddleware {
     onStart: F[Unit],
     onEnd: F[Unit],
     action: Request[F] => F[Either[Request[F], Response[F]]]
-  )(implicit F: Sync[F]
-  ): HttpMiddleware[F] = {
-
-    def use(
-      service: Kleisli[OptionT[F, ?], Request[F], Response[F]],
-      req: Request[F]
-    ): Stream[F, Option[Response[F]]] =
-      Stream.eval(
-        action(req).flatMap {
-          case Left(req) =>
-            service.run(req).value
-          case Right(resp) =>
-            F.pure(Option(resp))
-        }
-      )
+  )(implicit F: Bracket[F, Throwable]): HttpMiddleware[F] = {
 
     (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
       Kleisli[OptionT[F, ?], Request[F], Response[F]](
         (req: Request[F]) =>
-          OptionT(
-            Stream
-              .bracket(onStart)(
-                Function.const(onEnd)
-              ).flatMap(Function.const(use(service, req)))
-              .compile
-              .toList
-              .map((l: List[Option[Response[F]]]) => l.headOption.flatten)
-          )
-      )
+          OptionT(F.bracket(onStart)(Function.const(
+            action(req).flatMap{
+              case Left(req) => service.run(req).value
+              case Right(resp) => F.pure(resp.some)
+            }
+          ))(Function.const(onEnd))))
   }
 
   /** Middleware which counts the active requests and allows for an action to be
