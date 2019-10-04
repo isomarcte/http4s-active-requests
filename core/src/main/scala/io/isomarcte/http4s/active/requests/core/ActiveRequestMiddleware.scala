@@ -52,7 +52,7 @@ object ActiveRequestMiddleware {
         (req: Request[F]) =>
           OptionT(F.bracket(onStart)(Function.const(
             action(req).flatMap{
-              case Left(req) => service.run(req).value
+              case Left(req) => service.map((resp: Response[F]) => resp.copy(body = resp.body.onFinalize(onEnd))).run(req).value
               case Right(resp) => F.pure(resp.some)
             }
           ))(Function.const(onEnd))))
