@@ -14,7 +14,7 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
 
   "serviceUnavailableMiddleware" should "reject requests if there are too many concurrently running" in io {
     val ec: ExecutionContext           = BaseTest.cachedEC
-    implicit val cs: ContextShift[IO] = IO.contextShift(ec)
+    implicit val cs: ContextShift[IO]  = IO.contextShift(ec)
     val limit: Int                     = 1
     val latch: CountDownLatch          = new CountDownLatch(2)
     val semaphore: Semaphore           = new Semaphore(limit)

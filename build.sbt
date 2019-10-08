@@ -43,12 +43,11 @@ lazy val scalatest    = scalatestG %% scalatestA    % scalatestV
 
 // ThisBuild Scoped Settings //
 
-ThisBuild / organization        := "io.isomarcte"
-ThisBuild / scalaVersion        := scala212
-ThisBuild / scalacOptions       += "-target:jvm-1.8"
-ThisBuild / javacOptions        ++= Seq("-source", "1.8", "-target", "1.8")
-ThisBuild / dependencyOverrides ++= Seq(
-  catsEffect, catsCore)
+ThisBuild / organization := "io.isomarcte"
+ThisBuild / scalaVersion := scala212
+ThisBuild / scalacOptions += "-target:jvm-1.8"
+ThisBuild / javacOptions ++= Seq("-source", "1.8", "-target", "1.8")
+ThisBuild / dependencyOverrides ++= Seq(catsEffect, catsCore)
 
 // General Configuration //
 lazy val publishSettings = Seq(

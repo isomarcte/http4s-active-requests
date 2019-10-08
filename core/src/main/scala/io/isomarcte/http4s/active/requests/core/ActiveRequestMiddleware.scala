@@ -45,17 +45,30 @@ object ActiveRequestMiddleware {
     onStart: F[Unit],
     onEnd: F[Unit],
     action: Request[F] => F[Either[Request[F], Response[F]]]
-  )(implicit F: Bracket[F, Throwable]): HttpMiddleware[F] = {
+  )(implicit F: Bracket[F, Throwable]
+  ): HttpMiddleware[F] = {
 
     (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
       Kleisli[OptionT[F, ?], Request[F], Response[F]](
         (req: Request[F]) =>
-          OptionT(F.bracket(onStart)(Function.const(
-            action(req).flatMap{
-              case Left(req) => service.map((resp: Response[F]) => resp.copy(body = resp.body.onFinalize(onEnd))).run(req).value
-              case Right(resp) => F.pure(resp.some)
-            }
-          ))(Function.const(onEnd))))
+          OptionT(
+            F.bracket(onStart)(
+              Function.const(
+                action(req).flatMap {
+                  case Left(req) =>
+                    service
+                      .map(
+                        (resp: Response[F]) =>
+                          resp.copy(body = resp.body.onFinalize(onEnd))
+                      )
+                      .run(req)
+                      .value
+                  case Right(resp) => F.pure(resp.some)
+                }
+              )
+            )(Function.const(onEnd))
+          )
+      )
   }
 
   /** Middleware which counts the active requests and allows for an action to be
