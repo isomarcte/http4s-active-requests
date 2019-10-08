@@ -29,7 +29,7 @@ object ActiveRequestMiddleware {
     *                `Request` or a `Response`. If a `Response` is yielded
     *                this has the effect of bypassing the underlying service.
     *
-    * @tparam F a `Sync` type.
+    * @tparam F a `Bracket` type.
     *
     * @return a pair of a `F[S]` which can be used to inspect the current
     *         state externally and the middleware.
@@ -45,21 +45,31 @@ object ActiveRequestMiddleware {
       Kleisli[OptionT[F, ?], Request[F], Response[F]](
         (req: Request[F]) =>
           OptionT(
-            F.bracket(onStart)(
+            F.bracketCase(
+              onStart
+            )(
               Function.const(
-                action(req).flatMap {
-                  case Left(req) =>
-                    service
-                      .map(
-                        (resp: Response[F]) =>
-                          resp.copy(body = resp.body.onFinalize(onEnd))
+                OptionT(
+                  action(req).flatMap {
+                    case Left(req) =>
+                      service(req).value
+                    case Right(resp) =>
+                      F.pure(resp.some)
+                  }
+                ).map(
+                    (resp: Response[F]) =>
+                      resp.copy(
+                        body = resp.body.onFinalize(onEnd)
                       )
-                      .run(req)
-                      .value
-                  case Right(resp) => F.pure(resp.some)
-                }
+                  )
+                  .value
               )
-            )(Function.const(onEnd))
+            ) {
+              case (_, ExitCase.Completed) =>
+                F.unit
+              case (_, _) =>
+                onEnd
+            }
           )
       )
   }
