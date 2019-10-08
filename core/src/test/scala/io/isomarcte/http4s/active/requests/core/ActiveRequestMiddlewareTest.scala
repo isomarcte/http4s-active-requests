@@ -26,17 +26,17 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
     val request: Request[IO]           = Request[IO]()
     val f: IO[Unit]                    = IO(latch.countDown()) *> IO(semaphore.acquire())
     val onMax: IO[Unit]                = IO(onMaxCount.incrementAndGet()).void
-    val middleware: HttpMiddleware[IO] =
-      ActiveRequestMiddleware.serviceUnavailableMiddleware_[IO, Long](
+    val middleware: IO[HttpMiddleware[IO]] =
+      ActiveRequestMiddleware.serviceUnavailableMiddleware_[IO](
         (l: Long) => IO(onStartReportValue.set(l)),
         (l: Long) => IO(onEndReportValue.set(l)),
         onMax,
         limit.toLong
       )
-    val service: HttpRoutes[IO] =
-      middleware(ActiveRequestMiddlewareTest.effectService[IO](f))
 
     for {
+      middleware_ <- middleware
+      service = middleware_(ActiveRequestMiddlewareTest.effectService[IO](f))
       // T0
       resp0 <- service.run(request).value // Should be Ok
       start0 <- startPoll

@@ -2,20 +2,13 @@ package io.isomarcte.http4s.active.requests.core
 
 import cats.data._
 import cats.effect._
+import cats.effect.concurrent._
 import cats.implicits._
-import java.util.concurrent.atomic._
-import java.util.function.UnaryOperator
 import org.http4s._
 import org.http4s.server._
 
 /** Http4s middleware which allows for introspection based on the number of active requests. */
 object ActiveRequestMiddleware {
-
-  /** A `UnaryOperator` for updating the `AtomicReference` state. */
-  private[this] def unaryOp[S](f: S => S): UnaryOperator[S] =
-    new UnaryOperator[S] {
-      final override def apply(s: S): S = f(s)
-    }
 
   /** This function provides the fundamental primitive operations on which the
     * other functions are defined. It is quite a bit uglier than the higher
@@ -84,34 +77,30 @@ object ActiveRequestMiddleware {
     *                effect of bypassing the underlying service.
     *
     * @tparam F a `Sync` type.
-    * @tparam N a `Numeric` state type, e.g. `Long`.
+    * @tparam G a `Sync` type.
     *
     * @return the middleware.
     */
-  def activeRequestCountMiddleware[F[_], N](
-    startReport: N => F[Unit],
-    endReport: N => F[Unit],
-    action: (N, Request[F]) => F[Either[Request[F], Response[F]]]
+  def activeRequestCountMiddleware[F[_], G[_]](
+    startReport: Long => F[Unit],
+    endReport: Long => F[Unit],
+    action: (Long, Request[F]) => F[Either[Request[F], Response[F]]]
   )(implicit F: Sync[F],
-    N: Numeric[N]
-  ): HttpMiddleware[F] = {
-    val state: AtomicReference[N] = new AtomicReference(N.zero)
-    val inspect: F[N]             = F.delay(state.get)
-    val succ: F[Unit] = for {
-      n <- F.delay(state.updateAndGet(unaryOp((n: N) => N.plus(n, N.one))))
-      unit <- startReport(n)
-    } yield unit
-
-    val pred: F[Unit] = for {
-      n <- F.delay(state.updateAndGet(unaryOp((n: N) => N.minus(n, N.one))))
-      unit <- endReport(n)
-    } yield unit
-
-    val primitiveAction: Request[F] => F[Either[Request[F], Response[F]]] =
-      ((r: Request[F]) => inspect.flatMap((n: N) => action(n, r)))
-
-    this.primitive(succ, pred, primitiveAction)
-  }
+    G: Sync[G]
+  ): G[HttpMiddleware[F]] =
+    Ref.in[G, F, Long](0L).map { (ref: Ref[F, Long]) =>
+      def modifyAndReturn(f: Long => Long)(l: Long): (Long, Long) = {
+        val result: Long = f(l)
+        (result, result)
+      }
+      val succ: F[Unit] =
+        ref.modify(modifyAndReturn(_ + 1L)).flatMap(startReport)
+      val pred: F[Unit] =
+        ref.modify(modifyAndReturn(_ - 1L)).flatMap(endReport)
+      val primitiveAction: Request[F] => F[Either[Request[F], Response[F]]] =
+        ((r: Request[F]) => ref.get.flatMap((n: Long) => action(n, r)))
+      this.primitive[F](succ, pred, primitiveAction)
+    }
 
   /** Middleware which bypasses the service if there are more than a certain
     * number of active requests. When the `onMax` effect is invoked, this
@@ -131,30 +120,29 @@ object ActiveRequestMiddleware {
     *        to allow.
     *
     * @tparam F a `Sync` type.
-    * @tparam N a `Numeric` state type, e.g. `Long`.
     *
     * @return the middleware.
     */
-  def rejectWithResponseOverMaxMiddleware[F[_], N](
-    startReport: N => F[Unit],
-    endReport: N => F[Unit],
+  def rejectWithResponseOverMaxMiddleware[F[_], G[_]](
+    startReport: Long => F[Unit],
+    endReport: Long => F[Unit],
     onMax: F[Unit],
     response: Response[F]
   )(
-    maxConcurrentRequests: N
+    maxConcurrentRequests: Long
   )(implicit F: Sync[F],
-    N: Numeric[N]
-  ): HttpMiddleware[F] = {
+    G: Sync[G]
+  ): G[HttpMiddleware[F]] = {
     val resp: Either[Request[F], Response[F]] = Right(response)
-    this.activeRequestCountMiddleware(
+    this.activeRequestCountMiddleware[F, G](
       startReport,
-      endReport,
-      (currentActiveRequests: N, req: Request[F]) =>
-        if (N.gt(currentActiveRequests, maxConcurrentRequests)) {
+      endReport, { (currentActiveRequests: Long, req: Request[F]) =>
+        if (currentActiveRequests > maxConcurrentRequests) {
           onMax.map(Function.const(resp))
         } else {
           F.pure(Left(req))
         }
+      }
     )
   }
 
@@ -171,19 +159,17 @@ object ActiveRequestMiddleware {
     *        to allow.
     *
     * @tparam F a `Sync` type.
-    * @tparam N a `Numeric` state type, e.g. `Long`.
     *
     * @return the middleware.
     */
-  def serviceUnavailableMiddleware_[F[_], N](
-    startReport: N => F[Unit],
-    endReport: N => F[Unit],
+  def serviceUnavailableMiddleware_[F[_]](
+    startReport: Long => F[Unit],
+    endReport: Long => F[Unit],
     onMax: F[Unit],
-    maxConcurrentRequests: N
-  )(implicit F: Sync[F],
-    N: Numeric[N]
-  ): HttpMiddleware[F] =
-    this.rejectWithResponseOverMaxMiddleware[F, N](
+    maxConcurrentRequests: Long
+  )(implicit F: Sync[F]
+  ): F[HttpMiddleware[F]] =
+    this.rejectWithResponseOverMaxMiddleware[F, F](
       startReport,
       endReport,
       onMax,
@@ -199,16 +185,14 @@ object ActiveRequestMiddleware {
     *        to allow.
     *
     * @tparam F a `Sync` type.
-    * @tparam N a `Numeric` state type, e.g. `Long`.
     *
     * @return the middleware.
     */
-  def serviceUnavailableMiddleware[F[_], N](
-    maxConcurrentRequests: N
-  )(implicit F: Sync[F],
-    N: Numeric[N]
-  ): HttpMiddleware[F] = {
-    val const: N => F[Unit] = Function.const(F.pure(()))
+  def serviceUnavailableMiddleware[F[_]](
+    maxConcurrentRequests: Long
+  )(implicit F: Sync[F]
+  ): F[HttpMiddleware[F]] = {
+    val const: Long => F[Unit] = Function.const(F.pure(()))
     this.serviceUnavailableMiddleware_(
       const,
       const,
