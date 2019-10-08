@@ -3,6 +3,7 @@ package io.isomarcte.http4s.active.requests.core.unit
 import cats.data._
 import cats.effect._
 import cats.implicits._
+import fs2.Stream
 import io.isomarcte.http4s.active.requests.core._
 import java.util.concurrent._
 import java.util.concurrent.atomic._
@@ -34,17 +35,44 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
         limit.toLong
       )
 
+    def emptyBody(s: Stream[IO, Byte]): IO[Unit] =
+      s.compile.toList.flatMap(
+        (l: List[Byte]) =>
+          l.size match {
+            case 0 => IO.unit
+            case otherwise =>
+              IO.raiseError(
+                new AssertionError(
+                  s"Expected empty body, but body has size: $otherwise"
+                )
+              )
+          }
+      )
+
+    def runRequestAndCheckBody(
+      service: HttpRoutes[IO]
+    )(
+      request: Request[IO]
+    ): IO[Option[Response[IO]]] =
+      service
+        .run(request)
+        .flatMapF(
+          (resp: Response[IO]) => emptyBody(resp.body) *> IO.pure(resp.some)
+        )
+        .value
+
     for {
       middleware_ <- middleware
       service = middleware_(ActiveRequestMiddlewareTest.effectService[IO](f))
+      runRequest = runRequestAndCheckBody(service)(_)
       // T0
-      resp0 <- service.run(request).value // Should be Ok
+      resp0 <- runRequest(request) // Should be Ok
       start0 <- startPoll
       end0 <- endPoll
 
       // T1
       // Out of permits so this will block. We will join the Fiber later
-      fiber1 <- (IO.shift(ec) *> service.run(request).value).start
+      fiber1 <- (IO.shift(ec) *> runRequest(request)).start
 
       // Wait for the latch to reach zero before we poll. This should indicate
       // that we have already incremented the counter.
@@ -53,8 +81,10 @@ final class ActiveRequestMiddlewareTest extends BaseTest {
       end1 <- endPoll
 
       // T2
-      // This should _not_ block, because there are too many active request. It should return a 503 immediately.
-      resp2 <- service.run(request).value // Should be ServiceUnavailable
+      //
+      // This should _not_ block, because there are too many active
+      // request. It should return a 503 immediately.
+      resp2 <- runRequest(request) // Should be ServiceUnavailable
       start2 <- startPoll
       end2 <- endPoll
 
