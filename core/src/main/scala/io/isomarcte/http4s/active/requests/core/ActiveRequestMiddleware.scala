@@ -29,48 +29,43 @@ object ActiveRequestMiddleware {
     *                `Request` or a `Response`. If a `Response` is yielded
     *                this has the effect of bypassing the underlying service.
     *
-    * @tparam F a `Bracket` type.
+    * @tparam F a `Sync` type.
     *
-    * @return a pair of a `F[S]` which can be used to inspect the current
-    *         state externally and the middleware.
+    * @return the middleware
     */
-  def primitive[F[_]](
+  def primitive[F[_]: Sync](
     onStart: F[Unit],
     onEnd: F[Unit],
     action: Request[F] => F[Either[Request[F], Response[F]]]
-  )(implicit F: Bracket[F, Throwable]
   ): HttpMiddleware[F] = {
-
     (service: Kleisli[OptionT[F, ?], Request[F], Response[F]]) =>
       Kleisli[OptionT[F, ?], Request[F], Response[F]](
         (req: Request[F]) =>
-          OptionT(
-            F.bracketCase(
-              onStart
-            )(
-              Function.const(
-                OptionT(
-                  action(req).flatMap {
-                    case Left(req) =>
-                      service(req).value
-                    case Right(resp) =>
-                      F.pure(resp.some)
-                  }
-                ).map(
-                    (resp: Response[F]) =>
-                      resp.copy(
-                        body = resp.body.onFinalize(onEnd)
-                      )
-                  )
-                  .value
-              )
-            ) {
-              case (_, ExitCase.Completed) =>
-                F.unit
-              case (_, _) =>
-                onEnd
-            }
-          )
+          Sync[OptionT[F, ?]].bracketCase(
+            OptionT.liftF(onStart)
+          )(
+            Function.const(
+              OptionT
+                .liftF(action(req))
+                .flatMap {
+                  case Left(req) =>
+                    service(req)
+                  case Right(resp) =>
+                    OptionT.pure(resp)
+                }
+                .map(
+                  (resp: Response[F]) =>
+                    resp.copy(
+                      body = resp.body.onFinalize(onEnd)
+                    )
+                )
+            )
+          ) {
+            case (_, ExitCase.Completed) =>
+              OptionT.pure(())
+            case (_, _) =>
+              OptionT.liftF(onEnd)
+          }
       )
   }
 
