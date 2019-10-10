@@ -22,6 +22,7 @@ val typelevelG = "org.typelevel"
 val catsCoreA          = "cats-core"
 val catsEffectA        = "cats-effect"
 val fs2CoreA           = "fs2-core"
+val http4sBlazeClientA = "http4s-blaze-client"
 val http4sBlazeServerA = "http4s-blaze-server"
 val http4sClientA      = "http4s-client"
 val http4sDSLA         = "http4s-dsl"
@@ -41,6 +42,7 @@ val scalatestV  = "3.0.8"
 lazy val catsCore          = typelevelG %% catsCoreA          % catsCoreV
 lazy val catsEffect        = typelevelG %% catsEffectA        % catsEffectV
 lazy val fs2Core           = fs2G       %% fs2CoreA           % fs2V
+lazy val http4sBlazeClient = http4sG    %% http4sBlazeClientA % http4sV
 lazy val http4sBlazeServer = http4sG    %% http4sBlazeServerA % http4sV
 lazy val http4sClient      = http4sG    %% http4sClientA      % http4sV
 lazy val http4sDSL         = http4sG    %% http4sDSLA         % http4sV
@@ -131,7 +133,8 @@ lazy val core = project
       scalatest         % "test,it",
       http4sBlazeServer % "it",
       http4sClient      % "it",
-      http4sDSL         % "it"
+      http4sDSL         % "it",
+      http4sBlazeClient % "it"
     ),
     addCompilerPlugin(
       "org.spire-math" % "kind-projector" % "0.9.9" cross CrossVersion.binary
