@@ -13,13 +13,6 @@ sealed trait SeeSawSemaphore[F[_]] extends Semaphore[F] {
 object SeeSawSemaphore {
   private[this] final case class Proxy[F[_]](value: Semaphore[F]) extends AnyVal
   private[this] final case class Mate[F[_]](value: Semaphore[F]) extends AnyVal
-  private[this] sealed trait MutualExclusionLock[F[_]]{
-    def value: Semaphore[F]
-  }
-  private[this] object MutualExclusionLock {
-    def apply[F[_]: Concurrent]: F[MutualExclusionLock[F]] =
-      Semaphore(1L).map((s: Semaphore[F]) => new MutualExclusionLock[F]{ override final val value: Semaphore[F] = s})
-  }
 
   private[this] final case class StartsFull[F[_]](value: Semaphore[F]) extends AnyVal
   private[this] object StartsFull {
@@ -48,64 +41,26 @@ object SeeSawSemaphore {
     mate: Mate[F]
   )(implicit F: Sync[F]) extends SeeSawSemaphore[F] {
 
-    private[this] def printSemaphoreDebug(
-      value: Semaphore[F]
-    )(
-      stage: String
-    ): F[Unit] =
-      (for {
-        count <- value.count
-        available <- value.available
-      } yield s"Semaphore(hashCode = ${value.hashCode}, count = ${count}}, available = ${available})"
-      ).flatMap((s: String) =>
-        F.delay(println(s"Stage: $stage, $s"))
-      )
-
-    private[this] def debugProxy(
-      stage: String
-    ): F[Unit] = this.printSemaphoreDebug(this.proxy.value)("Proxy " ++ stage)
-
-    private[this] def debugMate(
-      stage: String
-    ): F[Unit] = this.printSemaphoreDebug(this.mate.value)("Mate " ++ stage)
-
-    // private[this] def debugLock(
-    //   stage: String
-    // ): F[Unit] = this.printSemaphoreDebug(this.mutalExclusionLock.value)("Lock " ++ stage)
-
     override final def acquireN(n: Long): F[Unit] =
-      this.debugMate("Double Pre") *>
-      this.mutalExclusionLock.value.withPermit(
-        this.debugLock("Pre") *>
-        this.debugProxy("Pre") *>
-        this.debugMate("Pre") *>
-        this.proxy.value.acquireN(n) *> this.mate.value.releaseN(n) *>
-        this.debugProxy("Post") *>
-        this.debugMate("Post")
-      ) *> this.debugLock("Post")
+      this.proxy.value.acquireN(n) *> F.delay(println("middle")) *> this.mate.value.releaseN(n)
     override final val available: F[Long] =
       this.proxy.value.available
     override final val count: F[Long] =
       this.proxy.value.count
     override final def releaseN(n: Long): F[Unit] =
-      this.mutalExclusionLock.value.withPermit(
-        this.proxy.value.releaseN(n) *> this.mate.value.acquireN(n)
-      )
+      this.proxy.value.releaseN(n) *> this.mate.value.acquireN(n)
     override final def tryAcquireN(n: Long): F[Boolean] =
-      this.mutalExclusionLock.value.withPermit(
-        this.proxy.value.tryAcquireN(n).flatTap{
-          case true =>
-            this.mate.value.releaseN(n)
-          case _ =>
-            F.unit
-        }
-      )
+      this.proxy.value.tryAcquireN(n).flatTap{
+        case true =>
+          this.mate.value.releaseN(n)
+        case _ =>
+          F.unit
+      }
     override final def withPermit[A](t: F[A]): F[A] =
-      this.mutalExclusionLock.value.acquire *> this.proxy.value.withPermit(
-        this.mate.value.release *> this.mutalExclusionLock.value.release *>
-          t.flatTap(Function.const(this.mutalExclusionLock.value.acquire))
+      this.proxy.value.withPermit(
+        this.mate.value.release *> t
       ).flatTap(
-        Function.const(this.mate.value.acquire *> this.mutalExclusionLock.value.release)
+        Function.const(this.mate.value.acquire)
       )
 
     override final val mateCount: F[Long] =
@@ -130,11 +85,10 @@ object SeeSawSemaphore {
     for {
       fullSemaphore <- StartsFull[F](permits)
       emptySemaphore <- StartsEmpty.empty(permits)
-      mutualExclusionLock <- MutualExclusionLock[F]
     } yield new SeeSawSemaphores[F] {
       override final val startsFullSeeSaw: StartsFullSeeSaw[F] =
-        StartsFullSeeSaw(SeeSawSemaphoreImpl(Proxy(fullSemaphore.value), Mate(emptySemaphore.value), mutualExclusionLock))
+        StartsFullSeeSaw(SeeSawSemaphoreImpl(Proxy(fullSemaphore.value), Mate(emptySemaphore.value)))
       override final val startsEmptySeeSaw: StartsEmptySeeSaw[F] =
-        StartsEmptySeeSaw(SeeSawSemaphoreImpl(Proxy(emptySemaphore.value), Mate(fullSemaphore.value), mutualExclusionLock))
+        StartsEmptySeeSaw(SeeSawSemaphoreImpl(Proxy(emptySemaphore.value), Mate(fullSemaphore.value)))
     }
 }
