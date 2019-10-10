@@ -26,53 +26,34 @@ final class ActiveRequestMiddlewareItTest extends BaseTest {
   import ActiveRequestMiddlewareItTest._
 
   "Running requests through a live http4s blaze server" should "correctly increment and decrement the active request counter" in io {
-    val emptyRef: IO[Ref[IO, Long]] = Ref.of(0L)
-    (emptyRef, emptyRef).mapN{(state: Ref[IO, Long], onMaxCountRef: Ref[IO, Long]) =>
-      val onMax: IO[Unit] = onMaxCountRef.update(_ + 1L)
-      ActiveRequestMiddleware.serviceUnavailableMiddleware_(
-        state.set _,
-        state.set _,
-        onMax,
-        1
-      ).flatMap((middleware: HttpMiddleware[IO]) =>
-        // testServer[IO](ioTimer, middleware, 1L)(Kleisli(Function.const(IO.unit))
-        testServer[IO](ioTimer, middleware, 1L)(
-          Kleisli{(testData: TestData[IO]) =>
-            val client: Client[IO] = testData.testClient
-            val postBody: String = "K&R"
-            for {
-              responseBodyFiber <- (IO.shift(blockingEC) *> client.expect[String](Method.POST(postBody, testData.baseUri))).start
-              _ <- testData.serverStart.acquire
-              stateT0 <- state.get
-              _ <- testData.serverComplete.release
-              responseBody <- responseBodyFiber.join
-              _ <- IO(responseBody shouldBe postBody).void
-              _ <- IO(stateT0 shouldBe 1L).void
-              stateT1 <- state.get
-              _ <- IO(stateT1 shouldBe 0L).void
-              responseBodyFiber <- (IO.shift(blockingEC) *> client.fetch(Method.POST(postBody, testData.baseUri))(Function.const(IO.unit))).start // Ignore body
-              _ <- testData.serverStart.acquire
-              stateT2 <- state.get
-              _ <- IO(stateT2 shouldBe 1L)
-              _ <- testData.serverComplete.release
-              _ <- responseBodyFiber.join
-              stateT3 <- state.get
-              _ <- IO(stateT3 shouldBe 0L)
-            } yield ()
-          }
-        )
+    val postBody: String = "K&R"
+    testServer(ioTimer,
+      Test[IO](
+        (uri: Uri) => Method.POST(postBody, uri),
+        (l: Long) => IO(l shouldBe 0L).void,
+        (l: Long) => IO(l shouldBe 1L).void,
+        (l: Long) => IO(l shouldBe 1L).void,
+        (l: Long) => IO(l shouldBe 0L).void,
+        (response: Response[IO]) => response.as[String].flatMap(s => IO(s shouldBe postBody).void)
       )
-    }.flatten
+    )
   }
 }
 
 object ActiveRequestMiddlewareItTest {
 
+  final case class Test[F[_]](
+    request: Uri => F[Request[F]],
+    beforeServerHasRecievedRequest: Long => F[Unit],
+    whileServerIsProcessingRequest: Long => F[Unit],
+    afterServerHasCompletedRequest: Long => F[Unit],
+    activeRequestMiddlewareCompleted: Long => F[Unit],
+    responseTest: Response[F] => F[Unit]
+  )
+
   final case class TestData[F[_]](
     baseUri: Uri,
-    testClient: Client[F],
-    serverStart: Semaphore[F],
-    serverComplete: Semaphore[F]
+    testClient: Client[F]
   )
 
   implicit val ioTimer: Timer[IO] =
@@ -130,13 +111,14 @@ object ActiveRequestMiddlewareItTest {
   }
 
   private[this] def routesBracket[F[_]](
-    beforeResponseEmit: F[Unit],
-    afterResponseEmit: F[Unit]
+    serverHasRequest: F[Unit],
+    serverCompletedRequest: F[Unit]
   )(implicit F: Sync[F]): HttpMiddleware[F] = (service: HttpRoutes[F]) =>
   Kleisli((request: Request[F]) =>
     service.flatMapF((response: Response[F]) =>
       OptionT(
-        beforeResponseEmit *> F.pure(response.copy(body = response.body.onFinalize(afterResponseEmit)).some)
+        serverHasRequest *>
+        F.pure(response.copy(body = response.body.onFinalize(serverCompletedRequest)).some)
       )
     ).run(request)
   )
@@ -151,65 +133,89 @@ object ActiveRequestMiddlewareItTest {
     )
   }
 
-  def testServer[F[_]](
-    timer: Timer[F],
-    middleware: HttpMiddleware[F],
-    permits: Long
-  )(
-    tests: Kleisli[F, TestData[F], Unit]
-  )(implicit F: ConcurrentEffect[F], CS: ContextShift[F]): F[Unit] = {
+  def testServer(
+    timer: Timer[IO],
+    test: Test[IO]
+  ): IO[Unit] = {
 
-    val port: F[Int] = for {
-      random <- F.delay(new Random(System.currentTimeMillis()))
-      sp <- this.startingPort(random)
-      fp <- this.freePort(sp, 10)
-      _ <- F.delay(println(s"Port Selected For Test Server: $fp"))
+    val port: IO[Int] = for {
+      random <- IO(new Random(System.currentTimeMillis()))
+      sp <- this.startingPort[IO](random)
+      fp <- this.freePort[IO](sp, 10)
+      _ <- IO(println(s"Port Selected For Test Server: $fp"))
     } yield fp
 
-    def testStream(testData: TestData[F]): Stream[F, Unit] =
-      (for {
-        _ <- Stream.eval(F.delay(println("Begin tests...")))
-        _ <- Stream.eval(tests.run(testData))
-        _ <- Stream.eval(F.delay(println("End tests...")))
-      } yield ()).delayBy(FiniteDuration(50, TimeUnit.MILLISECONDS))(timer)
-
     Resource.make(
-      SignallingRef[F, Boolean](false)
-    )(_.set(true) *> F.delay(println("Server Shutdown Signaled"))).use((signallingRef: SignallingRef[F, Boolean]) =>
+      SignallingRef[IO, Boolean](false)
+    )(_.set(true) *> IO(println("Server Shutdown Signaled"))).use((signallingRef: SignallingRef[IO, Boolean]) =>
       Stream.eval(for {
         p <- port
-        serverStart <- Semaphore[F](0L)
-        serverComplete <- Semaphore[F](permits)
-        uri <- F.catchNonFatal(Uri.unsafeFromString(s"http://${this.testAddress.getHostName}:${p}/"))
-        ref <- Ref.of(ExitCode.Success)
+        serverHasRequest <- Deferred[IO, Unit]
+        processTestComplete <- Deferred[IO, Unit]
+        serverCompletedRequest <- Deferred[IO, Unit]
+        activeRequestMiddlewareStarted <- Deferred[IO, Unit]
+        activeRequestMiddlewareCompleted <- Deferred[IO, Unit]
+        uri <- IO(Uri.unsafeFromString(s"http://${this.testAddress.getHostName}:${p}/"))
+        ref <- Ref.of[IO, ExitCode](ExitCode.Success)
+        state <- Ref.of[IO, Long](0L)
+        arm <- ActiveRequestMiddleware.serviceUnavailableMiddleware_(
+          state.set _,
+          (l) => activeRequestMiddlewareStarted.get *> state.set(l) *> activeRequestMiddlewareCompleted.complete(()),
+          IO.unit,
+          1
+        )
       } yield {
-        val wrappedRoutes: HttpRoutes[F] =
-          middleware(
-            this.routesBracket[F](
-              serverStart.release,
-              serverComplete.acquire
+        val wrappedRoutes: HttpRoutes[IO] =
+          arm(
+            this.routesBracket[IO](
+              serverHasRequest.complete(()),
+              processTestComplete.get *> serverCompletedRequest.complete(())
             )(
-              F
+              Sync[IO]
             )(
-              this.routes[F]
+              this.routes[IO]
             )
           )
+        val testF: Stream[IO, Unit] =
+          this.testClient[IO].flatMap((client: Client[IO]) =>
+            Stream.eval(for {
+              s0 <- state.get
+              _ <- test.beforeServerHasRecievedRequest(s0)
+              request <- test.request(uri)
+              fiber0 <- (IO.shift(this.blockingEC) *> client.fetch(request)(test.responseTest)).start
+              _ <- serverHasRequest.get
+              s1 <- state.get
+              _ <- test.whileServerIsProcessingRequest(s1)
+              _ <- processTestComplete.complete(())
+              _ <- serverCompletedRequest.get
+              s2 <- state.get
+              _ <- test.afterServerHasCompletedRequest(s2)
+              _ <- activeRequestMiddlewareStarted.complete(())
+              _ <- activeRequestMiddlewareCompleted.get
+              s3 <- state.get
+              _ <- test.activeRequestMiddlewareCompleted(s3)
+              result <- fiber0.join
+            } yield result
+            )
+          )
+
+        val testStream: Stream[IO, Unit] =
+          testF.delayBy(FiniteDuration(50, TimeUnit.MILLISECONDS))
+
         this.blaze(p, timer).withHttpApp(wrappedRoutes.orNotFound).serveWhile(
           signallingRef,
           ref
         ).evalMap{
           case ExitCode.Success =>
-            F.delay(println("Server Shutdown Success"))
+            IO(println("Server Shutdown Success"))
           case otherwise =>
             val errorString: String = s"Invalid ExitCode: $otherwise"
-            F.delay(println(errorString)) *>
-            F.raiseError[Unit](new AssertionError(errorString))
-        }.onFinalize(F.delay(println("Server Shutdown Finalized"))
-        ).mergeHaltR(this.testClient[F].flatMap((client: Client[F]) =>
-          testStream(TestData(uri, client, serverStart, serverComplete)))
-        )
+            IO(println(errorString)) *>
+            IO.raiseError[Unit](new AssertionError(errorString))
+        }.onFinalize(IO(println("Server Shutdown Finalized"))
+        ).mergeHaltR(testStream)
       }).flatten.compile.drain *>
-        F.delay(println("Server Shutdown Completed"))
-      ) *> F.delay(println("Resource Complete"))
+        IO(println("Server Shutdown Completed"))
+      ) *> IO(println("Resource Complete"))
   }
 }
