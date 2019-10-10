@@ -74,8 +74,8 @@ object ActiveRequestMiddlewareItTest {
     } else {
       F.bracket(
         F.delay(new ServerSocket(startingPort))
-      )((s: ServerSocket) =>
-        F.delay(s.close) *> F.pure(startingPort)
+      )(
+        Function.const(F.pure(startingPort))
       )((s: ServerSocket) =>
         F.delay(s.close)
       ).handleErrorWith{(t: Throwable) =>
