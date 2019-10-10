@@ -11,27 +11,70 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.Random
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.http4s._
 import org.http4s.client._
 import org.http4s.client.dsl.io._
 import org.http4s.dsl._
+import org.http4s.implicits._
+import org.http4s.server._
 import org.http4s.server.blaze._
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.FiniteDuration
 
 final class ActiveRequestMiddlewareItTest extends BaseTest {
   import ActiveRequestMiddlewareItTest._
 
   "Running requests through a live http4s blaze server" should "correctly increment and decrement the active request counter" in io {
-    testServer[IO](ioTimer)(
-      Kleisli{(testData: TestData[IO]) =>
-        val client: Client[IO] = testData.testClient
-        val postBody: String = "K&R"
-        for {
-          responseBody <- client.expect[String](Method.POST(postBody, testData.baseUri))
-          unit <- IO(responseBody shouldBe postBody).void
-        } yield unit
-      }
-    )
+    val emptyRef: IO[Ref[IO, Long]] = Ref.of(0L)
+    (emptyRef, emptyRef, emptyRef).mapN{(startRef: Ref[IO, Long], endRef: Ref[IO, Long], onMaxCountRef: Ref[IO, Long]) =>
+      val onMax: IO[Unit] = onMaxCountRef.update(_ + 1L)
+      ActiveRequestMiddleware.serviceUnavailableMiddleware_(
+        startRef.set _,
+        endRef.set _,
+        onMax,
+        1
+      ).flatMap((middleware: HttpMiddleware[IO]) =>
+        // testServer[IO](ioTimer, middleware, 1L)(Kleisli(Function.const(IO.unit))
+        testServer[IO](ioTimer, middleware, 1L)(
+          Kleisli{(testData: TestData[IO]) =>
+            val client: Client[IO] = testData.testClient
+            val postBody: String = "K&R"
+            for {
+              _ <- IO(println("client acquire")) *> testData.seeSawSemaphore.acquire
+              responseBodyFiber <- client.expect[String](Method.POST(postBody, testData.baseUri)).start
+              startT0 <- startRef.get
+              _ <- testData.seeSawSemaphore.release
+              responseBody <- responseBodyFiber.join
+              _ <- IO(responseBody shouldBe postBody).void
+              _ <- IO(startT0 shouldBe 1L)
+            } yield ()
+          }
+        )
+      )
+    }.flatten
+  }
+
+  it should "Derp" in io {
+    for {
+      s <- SeeSawSemaphore[IO](1L)
+      full = s.startsFullSeeSaw
+      empty = s.startsEmptySeeSaw
+      fsize0 <- full.value.available
+      esize0 <- empty.value.available
+      fcount0 <- full.value.count
+      ecount0 <- empty.value.count
+      _ <- full.value.acquire
+      fsize1 <- full.value.available
+      esize1 <- empty.value.available
+    } yield {
+      fsize0 shouldBe 1L
+      esize0 shouldBe 0L
+      fcount0 shouldBe 1L
+      ecount0 shouldBe 0L
+      fsize1 shouldBe 0L
+      esize1 shouldBe 1L
+    }
   }
 }
 
@@ -39,7 +82,8 @@ object ActiveRequestMiddlewareItTest {
 
   final case class TestData[F[_]](
     baseUri: Uri,
-    testClient: Client[F]
+    testClient: Client[F],
+    seeSawSemaphore: SeeSawSemaphore[F]
   )
 
   implicit val ioTimer: Timer[IO] =
@@ -87,14 +131,25 @@ object ActiveRequestMiddlewareItTest {
       }
     }
 
-  private[this] def routes[F[_]: Sync]: Http[F, F] = {
+  private[this] def routes[F[_]: Sync]: HttpRoutes[F] = {
     val dsl: Http4sDsl[F] = Http4sDsl[F]
     import dsl._
     Http[F, F]{
       case req @ POST -> Root =>
         Ok().map(_.withEntity(req.body))
-    }
+    }.mapF(OptionT.liftF(_))
   }
+
+  private[this] def routesBracket[F[_]](
+    beforeResponseEmit: F[Unit],
+    afterResponseEmit: F[Unit]
+  )(implicit F: Sync[F]): HttpMiddleware[F] = (service: HttpRoutes[F]) =>
+  Kleisli((request: Request[F]) =>
+    service.flatMapF((response: Response[F]) =>
+      OptionT(
+        beforeResponseEmit *> F.pure(response.copy(body = response.body.onFinalize(afterResponseEmit)).some))
+    ).run(request)
+  )
 
   private[this] def blaze[F[_]: ConcurrentEffect](
     port: Int,
@@ -107,7 +162,9 @@ object ActiveRequestMiddlewareItTest {
   }
 
   def testServer[F[_]](
-    timer: Timer[F]
+    timer: Timer[F],
+    middleware: HttpMiddleware[F],
+    permits: Long
   )(
     tests: Kleisli[F, TestData[F], Unit]
   )(implicit F: ConcurrentEffect[F], CS: ContextShift[F]): F[Unit] = {
@@ -120,21 +177,33 @@ object ActiveRequestMiddlewareItTest {
     } yield fp
 
     def testStream(testData: TestData[F]): Stream[F, Unit] =
-      for {
+      (for {
         _ <- Stream.eval(F.delay(println("Begin tests...")))
         _ <- Stream.eval(tests.run(testData))
         _ <- Stream.eval(F.delay(println("End tests...")))
-      } yield ()
+      } yield ()).delayBy(FiniteDuration(50, TimeUnit.MILLISECONDS))(timer)
 
     Resource.make(
       SignallingRef[F, Boolean](false)
     )(_.set(true) *> F.delay(println("Server Shutdown Signaled"))).use((signallingRef: SignallingRef[F, Boolean]) =>
       Stream.eval(for {
         p <- port
+        seeSawSemaphores <- SeeSawSemaphore(permits)
         uri <- F.catchNonFatal(Uri.unsafeFromString(s"http://${this.testAddress.getHostName}:${p}/"))
         ref <- Ref.of(ExitCode.Success)
       } yield {
-        this.blaze(p, timer).withHttpApp(routes).serveWhile(
+        val wrappedRoutes: HttpRoutes[F] =
+          middleware(
+            this.routesBracket[F](
+              F.delay(println("server acquire")) *> seeSawSemaphores.startsEmptySeeSaw.value.acquire,
+              F.delay(println("server release")) *> seeSawSemaphores.startsEmptySeeSaw.value.release
+            )(
+              F
+            )(
+              this.routes[F]
+            )
+          )
+        this.blaze(p, timer).withHttpApp(wrappedRoutes.orNotFound).serveWhile(
           signallingRef,
           ref
         ).evalMap{
@@ -146,7 +215,7 @@ object ActiveRequestMiddlewareItTest {
             F.raiseError[Unit](new AssertionError(errorString))
         }.onFinalize(F.delay(println("Server Shutdown Finalized"))
         ).mergeHaltR(this.testClient[F].flatMap((client: Client[F]) =>
-          testStream(TestData(uri, client)))
+          testStream(TestData(uri, client, seeSawSemaphores.startsFullSeeSaw.value)))
         )
       }).flatten.compile.drain *>
         F.delay(println("Server Shutdown Completed"))

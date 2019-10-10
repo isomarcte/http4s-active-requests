@@ -128,10 +128,10 @@ lazy val core = project
     libraryDependencies ++= Seq(
       fs2Core,
       http4sServer,
-      scalatest % "test,it",
+      scalatest         % "test,it",
       http4sBlazeServer % "it",
-      http4sClient % "it",
-      http4sDSL % "it"
+      http4sClient      % "it",
+      http4sDSL         % "it"
     ),
     addCompilerPlugin(
       "org.spire-math" % "kind-projector" % "0.9.9" cross CrossVersion.binary
