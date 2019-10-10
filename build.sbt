@@ -19,11 +19,14 @@ val typelevelG = "org.typelevel"
 
 // Artifacts //
 
-val catsCoreA     = "cats-core"
-val catsEffectA   = "cats-effect"
-val fs2CoreA      = "fs2-core"
-val http4sServerA = "http4s-server"
-val scalatestA    = "scalatest"
+val catsCoreA          = "cats-core"
+val catsEffectA        = "cats-effect"
+val fs2CoreA           = "fs2-core"
+val http4sBlazeServerA = "http4s-blaze-server"
+val http4sClientA      = "http4s-client"
+val http4sDSLA         = "http4s-dsl"
+val http4sServerA      = "http4s-server"
+val scalatestA         = "scalatest"
 
 // Versions //
 
@@ -35,11 +38,14 @@ val scalatestV  = "3.0.8"
 
 // GAVs //
 
-lazy val catsCore     = typelevelG %% catsCoreA     % catsCoreV
-lazy val catsEffect   = typelevelG %% catsEffectA   % catsEffectV
-lazy val fs2Core      = fs2G       %% fs2CoreA      % fs2V
-lazy val http4sServer = http4sG    %% http4sServerA % http4sV
-lazy val scalatest    = scalatestG %% scalatestA    % scalatestV
+lazy val catsCore          = typelevelG %% catsCoreA          % catsCoreV
+lazy val catsEffect        = typelevelG %% catsEffectA        % catsEffectV
+lazy val fs2Core           = fs2G       %% fs2CoreA           % fs2V
+lazy val http4sBlazeServer = http4sG    %% http4sBlazeServerA % http4sV
+lazy val http4sClient      = http4sG    %% http4sClientA      % http4sV
+lazy val http4sDSL         = http4sG    %% http4sDSLA         % http4sV
+lazy val http4sServer      = http4sG    %% http4sServerA      % http4sV
+lazy val scalatest         = scalatestG %% scalatestA         % scalatestV
 
 // ThisBuild Scoped Settings //
 
@@ -115,12 +121,17 @@ lazy val root = (project in file("."))
 // Projects //
 
 lazy val core = project
+  .configs(IntegrationTest)
   .settings(
     name := s"$projectName-core",
+    Defaults.itSettings,
     libraryDependencies ++= Seq(
       fs2Core,
       http4sServer,
-      scalatest % Test
+      scalatest % "test,it",
+      http4sBlazeServer % "it",
+      http4sClient % "it",
+      http4sDSL % "it"
     ),
     addCompilerPlugin(
       "org.spire-math" % "kind-projector" % "0.9.9" cross CrossVersion.binary
